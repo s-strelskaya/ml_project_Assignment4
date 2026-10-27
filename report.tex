@@ -1,0 +1,354 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+\setlist{itemsep=2pt,topsep=4pt}
+\usepackage[font=small,labelfont=bf]{caption}
+
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.8}
+\renewcommand{\textfraction}{0.07}
+\renewcommand{\floatpagefraction}{0.85}
+\setlength{\textfloatsep}{10pt plus 2pt minus 2pt}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\norm}[1]{\lVert #1 \rVert}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+\title{\textbf{Double Descent in Linear Models}\\[2pt]
+\large Assignment 4 --- reproducing Belkin et al.\ (PNAS 2019)}
+\author{Sofya Strelskaya (47912A)\\
+\small MSc Data Science for Economics, Universit\`a degli Studi di Milano}
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+I reproduce the double-descent test-error curve for linear least squares with the number of training points $n$ fixed and the number of parameters varied, on a synthetic dataset with noisy linear labels and on a real regression dataset (UCI Appliances Energy Prediction). On the real data, complexity is varied in two ways: by adding raw features, and by adding random Fourier features as in the original paper. In all three settings the training error reaches zero at the interpolation threshold, where the test error peaks by two to five orders of magnitude, and then decreases again as the model grows. The synthetic curve agrees with the closed-form expected risk to within a few percent. Ridge regression with a cross-validated penalty removes the peak completely. Gradient descent started at zero converges to the same minimum-norm solution as the closed form, and early stopping acts as a regulariser. The results also show the limits of the phenomenon: the over-parameterised minimum-norm model beats the classical optimum only when the signal is spread over many weak features, and on the noisy real dataset it never beats a simple regularised or constant predictor.
+\end{abstract}
+
+%=====================================================================
+\section{Introduction}
+%=====================================================================
+The classical account of generalisation says that as model complexity grows, bias falls and variance rises, so the test error is U-shaped and the best model sits somewhere before the point where it can fit the training data exactly. Belkin et al.~\cite{belkin2019} showed that this curve is only the first half of the picture. If complexity keeps growing past the \emph{interpolation threshold}, where the training error first reaches zero, the test error can fall again. They called the full curve \emph{double descent}. The key ingredient is the inductive bias: among the infinitely many interpolating solutions, the learning algorithm selects the one with the smallest norm, and that norm \emph{decreases} as more parameters are added.
+
+The objective of this project is to reproduce that curve in linear models, locate the interpolation threshold, compare least squares with ridge regression, and, as extensions, compare gradient descent with the closed-form solution and study the effect of label noise. Everything is implemented from scratch in NumPy in the notebook \texttt{double\_descent.ipynb}. All figures in this report are produced by it, apart from Figure~\ref{fig:theory}, which uses a short script (\texttt{theory\_check.py}) that reads the notebook's saved results.
+
+%=====================================================================
+\section{Methods}
+%=====================================================================
+\subsection{Estimators}
+All models are linear, $\hat y = x^\top w$, trained on $n$ points with the empirical squared loss $\frac1n\norm{Xw-y}^2$, $X\in\R^{n\times d}$. Let $X = U\operatorname{diag}(s)V^\top$ be the thin SVD with singular values $s_1\ge\dots\ge s_r>0$, $r=\operatorname{rank}X$.
+
+\paragraph{Minimum-norm least squares.} For $d<n$ the least-squares solution is unique. For $d\ge n$ there are infinitely many interpolating solutions, and, following the paper, I select the one of minimum $\ell_2$ norm, $w = X^+y$:
+\begin{equation}\label{eq:ls}
+  w_{\text{LS}} = \sum_{i=1}^{r} \frac{u_i^\top y}{s_i}\, v_i .
+\end{equation}
+I compute it through the SVD and not through the normal equations $(X^\top X)^{-1}X^\top y$: $X^\top X$ is singular for $d>n$, and close to $d=n$ it is so ill-conditioned that squaring the condition number would add numerical error to exactly the region of interest. Singular values below $\max(n,d)\,\varepsilon_{\text{mach}}\,s_1$ are discarded (the same default as \texttt{numpy.linalg.pinv}).
+
+\paragraph{Why the peak occurs.} Write $y = X w^\star + \epsilon$, with $\epsilon$ the label noise (including any part of the signal the model cannot represent). Then \eqref{eq:ls} contains the term $\sum_i (u_i^\top\epsilon / s_i)\, v_i$: noise is amplified by $1/s_i$. For a Gaussian $n\times d$ matrix the smallest singular value behaves like $|\sqrt n-\sqrt d|$, which vanishes at $d=n$. The estimator therefore explodes at the threshold. This blow-up is also visible in $\norm{w}$, which is why every figure shows the coefficient norm.
+
+\paragraph{Ridge regression.} Minimising $\frac1n\norm{Xw-y}^2+\lambda\norm{w}^2$ gives
+\begin{equation}\label{eq:ridge}
+  w_\lambda = \sum_{i=1}^{r} \frac{s_i}{s_i^2+n\lambda}\,(u_i^\top y)\, v_i .
+\end{equation}
+The filter factor $s_i/(s_i^2+n\lambda)$ is bounded by $1/(2\sqrt{n\lambda})$, so the noise amplification is capped regardless of how small $s_i$ is. Since one SVD gives the whole path, I evaluate several fixed values $\lambda\in\{10^{-4},10^{-3},10^{-2},10^{-1}\}$, and a ridge model whose $\lambda$ is chosen for each model size by 5-fold cross-validation on a grid of 29 values in $[10^{-6},10]$, using \emph{only} the training sample. As $\lambda\to0$, \eqref{eq:ridge} tends to \eqref{eq:ls}.
+
+\paragraph{Gradient descent.} Full-batch GD on $\frac1{2n}\norm{Xw-y}^2$ with step $\eta=1/L$, $L = s_1^2/n$ (the largest eigenvalue of $X^\top X/n$), which guarantees convergence. Starting from $w_0=0$, every update lies in the row space of $X$, so after $T$ steps
+\begin{equation}\label{eq:gd}
+  w_T = \sum_{i=1}^r \Bigl[1-\bigl(1-\eta s_i^2/n\bigr)^T\Bigr]\frac{u_i^\top y}{s_i}\, v_i .
+\end{equation}
+As $T\to\infty$ the bracket tends to 1 and $w_T\to X^+y$: GD from zero has an \emph{implicit bias} towards the minimum-norm interpolant. For finite $T$, directions with small $s_i$ are only partially fitted, which has an effect similar to ridge with $\lambda\approx 1/(\eta T)$. Starting from $w_0\ne0$ instead, GD converges to $X^+y + (I-X^+X)w_0$: the component of $w_0$ in the null space of $X$ is never updated.
+
+\subsection{Experimental protocol}
+\begin{itemize}
+  \item \textbf{Fix $n$, vary model size.} For each trial a training sample is drawn and the model size (number of features $d$, or of random features $N$) is swept on a grid that is logarithmic over the whole range and dense around the threshold (every $n/50$ steps in $[0.8n, 1.2n]$, plus $n-1$, $n$, $n+1$). Within a trial the models are \emph{nested}: the model with $d+1$ features is the model with $d$ features plus one more column. The curve therefore shows the effect of adding features, not of reshuffling them.
+  \item \textbf{Repetitions and summary statistic.} Every experiment is repeated over independent trials (40 for synthetic data, 300 for raw energy features, 20 for random features). Near the threshold the test error is extremely heavy-tailed. For example, at $d=n=100$ on synthetic data the median over 40 trials is 95, the mean is 4\,513, and the interquartile range is $[22, 516]$. For Gaussian designs the expected risk is in fact \emph{infinite} for $n-1\le d\le n+1$ (Section~\ref{sec:theory}). Plots therefore show the \emph{median} with a 25--75\% band, and the means are saved to \texttt{results/}.
+  \item \textbf{Metrics.} Training MSE, test MSE, $\norm{w}_2$, and the MSE of a constant predictor equal to the training mean (the ``null model''), which serves as a reference.
+  \item \textbf{Correctness and reproducibility.} Before the experiments, a set of unit tests checks the least-squares solver against \texttt{numpy.linalg.lstsq}, ridge against the normal equations, ridge with $\lambda\to0$ against minimum-norm LS, interpolation for $d\ge n$, and both GD limits above (from $0$ and from random $w_0$). Every experiment draws from its own generator derived from a single master seed, so results do not depend on the order in which cells are run.
+\end{itemize}
+
+%=====================================================================
+\section{Datasets}
+%=====================================================================
+\subsection{Synthetic regression with noisy linear labels}
+$x\sim\mathcal N(0,I_D)$ with $D=500$, and $y = x^\top\beta^\star + \epsilon$, $\epsilon\sim\mathcal N(0,\sigma^2)$, $\sigma=0.5$. The $d$-feature model sees only the first $d$ coordinates. I use $n=100$ training points and a fresh test set of 5\,000 points in each of the 40 trials, so that the test error is estimated precisely. The signs of $\beta^\star$ are redrawn in each trial.
+
+The main design choice is the shape of $\beta^\star$:
+\begin{itemize}
+  \item \textbf{Decaying coefficients} (main experiment): $\beta^\star_j \propto \pm 1/j$, normalised so that $\norm{\beta^\star}=1$. Then $\operatorname{Var}(x^\top\beta^\star)=1$ and the signal-to-noise ratio is $1/\sigma^2=4$. With decaying coefficients the first features carry most of the signal, so adding features first lowers bias and then mostly adds variance. This produces the classical U-shape for $d<n$, which the experiment needs in order to show where classical theory places the optimum.
+  \item \textbf{Flat coefficients} (control): $\beta^\star_j = \pm1/\sqrt D$. Every feature is equally weak, so a small model misses most of the signal. This is the ``many weak features'' regime, in which over-parameterisation is expected to help most.
+\end{itemize}
+The features the model cannot see act as additional noise from its point of view. This is why the curve can show a peak even when $\sigma=0$ (Section~\ref{sec:noise}). Because the data are centred by construction, the model has no intercept, and the threshold is exactly $d=n$. A Gaussian design also has a known closed-form risk, which I use to check the simulation.
+
+\subsection{Real data: UCI Appliances Energy Prediction}
+The dataset~\cite{candanedo2017} contains 19\,735 readings taken every 10 minutes over 4.5 months (January--May 2016) in a low-energy house. The target is the energy used by appliances (Wh), and the inputs are the temperature and humidity of nine rooms, six weather-station variables and the lighting consumption. I chose it because it is a genuine regression task, it is clean (no missing values) and large enough to estimate the test error precisely, and it has a moderate number of heterogeneous, correlated features. Unlike the synthetic data, there is no guarantee that a linear model is correct or that the signal is strong.
+
+\paragraph{Pre-processing.}
+\begin{itemize}
+  \item \textbf{Target $\log(\text{Appliances})$.} The raw target is strongly right-skewed, with spikes up to $\sim$1\,000~Wh (Figure~\ref{fig:energytarget}), so the squared error on the raw scale would be dominated by a few spikes. The log is close to symmetric.
+  \item \textbf{Features (28).} \texttt{lights}, the 18 indoor sensors, the 6 weather variables, $\sin/\cos$ of the time of day, and a weekend indicator. The columns \texttt{rv1}, \texttt{rv2} are dropped, since the dataset authors added them as pure random noise.
+  \item \textbf{Chronological split.} The first 70\% of the period is the training pool (13\,814 rows) and the rest is the test set (5\,777 rows), with a one-day gap between them. Consecutive readings are nearly identical, so a random split would put near-duplicates on both sides and leak information. The price is a genuine distribution shift: the model trains on winter and early spring and is tested on late spring.
+  \item \textbf{Per-trial fitting.} In each trial, $n$ points are sampled from the training pool. Standardisation and the target mean are computed on these $n$ points only and then applied to the test set.
+\end{itemize}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.5\textwidth]{figures/fig0_energy_target.pdf}
+  \caption{Distribution of the energy target before and after the log transform.}
+  \label{fig:energytarget}
+\end{figure}
+
+\paragraph{Two ways to vary complexity.}
+\begin{enumerate}[label=(\alph*)]
+  \item \textbf{Raw features}, the most literal reading of ``fix $n$, vary $d$''. Since there are only 28 features, $n$ must be very small to observe both regimes. I use $n=12$, add the features in a random order in each trial (to avoid favouring any ordering), and average over 300 trials. Centring $X$ and $y$ with the training means is equivalent to fitting an intercept and uses one degree of freedom: the centred matrix has rank at most $n-1$, so the threshold is at $d=n-1=11$ (i.e.\ $d+1=n$ parameters).
+  \item \textbf{Random Fourier features (RFF)}, which is the setting of the paper. $\phi(x)=\sqrt{2/N}\cos(W^\top x + b)$ with $W_{jk}\sim\mathcal N(0,1/\ell^2)$, $b_k\sim U[0,2\pi]$ \cite{rahimi2007}. The model is still linear in its parameters, since the features are drawn once and never learned. The bandwidth $\ell$ is the median pairwise distance among the training points (about 7.1 after standardisation), computed from the training sample only. I use real cosines instead of the paper's complex exponentials, so that one feature is one parameter and the threshold is at $N=n$. The setup is $n=500$, $N$ from 1 to $5\,000=10n$, 20 trials, with fresh features and a fresh sample in each trial. CV for ridge uses time-contiguous folds and is run on 10 of the trials to limit cost. As the $N\to\infty$ reference I also compute the paper's limiting predictor: the minimum-norm interpolant in the Gaussian-kernel RKHS, $\alpha = K^+y$.
+\end{enumerate}
+
+%=====================================================================
+\section{Results}
+%=====================================================================
+\subsection{Synthetic data: least squares and ridge}
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/fig1_synthetic_ls.pdf}
+    \caption{Least squares: train/test MSE and $\norm{w}_2$.}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/fig2_synthetic_ridge.pdf}
+    \caption{Least squares vs ridge (median test MSE).}
+  \end{subfigure}
+  \caption{Synthetic data, $n=100$, $\sigma=0.5$, decaying $\beta^\star$. Medians over 40 trials, with the 25--75\% band in (a). Dashed line: interpolation threshold $d=n$.}
+  \label{fig:synthetic}
+\end{figure}
+
+Figure~\ref{fig:synthetic}(a) shows the full double-descent curve. In the \textbf{under-parameterised regime} the test error follows the classical U-shape: it falls from 0.65 at $d=1$ to a minimum of \textbf{0.335 at $d=11$} and then rises as the extra features contribute little signal but considerable variance. The training error decreases monotonically and reaches zero exactly at $d=n=100$, which identifies the \textbf{interpolation threshold}. There the median test error is \textbf{95}, nearly 300 times the classical optimum and 76 times worse than predicting zero. The coefficient norm peaks at the same point (median $\norm{w}\approx 9.9$ against $\approx1$ elsewhere), as expected from the $1/s_{\min}$ term in \eqref{eq:ls}. In the \textbf{over-parameterised regime} the training error stays at zero while the test error falls again, to a second minimum of 1.02 at $d\approx212$, and then rises slowly to 1.11 at $d=500$. Over the same range the norm of the minimum-norm interpolant decreases steadily, to 0.52 at $d=500$.
+
+The second descent is real, but here it does not reach the first minimum: the best interpolating model (1.02) is three times worse than the classical optimum (0.335), and only slightly better than the null model (1.25). The reason is the decaying coefficients, as Section~\ref{sec:spread} shows.
+
+\paragraph{Ridge.} Figure~\ref{fig:synthetic}(b) and Table~\ref{tab:ridge} show that every positive $\lambda$ reduces the peak, and the reduction grows with $\lambda$. With $\lambda=0.1$, or with $\lambda$ chosen by CV, the curve no longer has any peak and is close to monotone after its minimum. CV ridge reaches 0.67 at $d=n$, against 95 for least squares. Away from the threshold the curves coincide (at $d=500$, all within 1.11--1.12), because there the smallest singular values are large compared with $\sqrt{n\lambda}$ and the filter in \eqref{eq:ridge} barely changes anything. Regularisation therefore does not improve on the best model (0.335 for both), but it makes the choice of model size almost irrelevant. This is consistent with the observation of Nakkiran et al.~\cite{nakkiran2021} that optimally tuned ridge removes double descent.
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{rrrrrrr}
+\toprule
+$d$ & LS ($\lambda=0$) & $\lambda=10^{-4}$ & $\lambda=10^{-3}$ & $\lambda=10^{-2}$ & $\lambda=10^{-1}$ & CV \\
+\midrule
+ 90 &  2.99 &  2.90 & 2.37 & 1.26 & 0.64 & 0.63 \\
+100 & \textbf{95.04} & 13.40 & 3.80 & 1.39 & 0.70 & 0.67 \\
+110 &  3.01 &  2.95 & 2.52 & 1.32 & 0.75 & 0.71 \\
+500 &  1.12 &  1.12 & 1.12 & 1.12 & 1.11 & 1.12 \\
+\bottomrule
+\end{tabular}
+\caption{Synthetic data: median test MSE of least squares and ridge near the threshold and at the largest model.}
+\label{tab:ridge}
+\end{table}
+
+\paragraph{Numerical note.} The height of the peak at exactly $d=n$ depends on how small singular values are treated. On a separate set of 40 trials, the median test MSE at $d=n$ is 57.6 with the default cutoff, 50.0, 6.6 and 1.6 when singular values below $10^{-3}$, $10^{-2}$ and $5\cdot10^{-2}$ times $s_1$ are dropped. The median ratio $s_{\min}/s_1$ is $1.8\cdot10^{-3}$. Truncating the spectrum is itself a regulariser (truncated SVD), so ``the'' peak height is not a well-defined quantity. Only its existence and location are.
+
+\subsection{Agreement with theory}\label{sec:theory}
+For a Gaussian design where the model uses a subset $S$ of $|S|=d$ features, the expected test MSE of minimum-norm least squares is known in closed form (Belkin, Hsu and Xu~\cite{belkin2020}; see also Hastie et al.~\cite{hastie2022}):
+\begin{equation}\label{eq:theory}
+\mathbb E[\text{test MSE}] =
+\begin{cases}
+(\sigma^2 + \norm{\beta^\star_{S^c}}^2)\Bigl(1+\dfrac{d}{n-d-1}\Bigr), & d\le n-2,\\[8pt]
+\norm{\beta^\star_S}^2\Bigl(1-\dfrac nd\Bigr) + (\sigma^2 + \norm{\beta^\star_{S^c}}^2)\Bigl(1+\dfrac{n}{d-n-1}\Bigr), & d\ge n+2,
+\end{cases}
+\end{equation}
+and it is infinite for $n-1\le d\le n+1$. The formula makes the two regimes explicit. Below the threshold the variance factor $d/(n-d-1)$ grows with $d$. Above it the variance factor $n/(d-n-1)$ \emph{shrinks} with $d$, while the term $\norm{\beta^\star_S}^2(1-n/d)$ is a bias caused by the minimum-norm solution shrinking towards zero along directions the data cannot identify. Figure~\ref{fig:theory} overlays \eqref{eq:theory} on the simulation. The agreement is close: 0.648 vs 0.652 at $d=1$, 0.339 vs 0.335 at $d=11$, 3.17 vs 3.01 at $d=110$, 1.006 vs 1.024 at $d=212$, 1.113 vs 1.115 at $d=500$. The theoretical minima are at $d=13$ (0.338) and $d=204$ (1.005), also close to the empirical ones. Near the threshold the empirical mean grows without bound, as expected for an infinite expectation, while the median stays finite. This independent check confirms that the implementation is correct and that the median is the right summary to plot.
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/fig10_theory.pdf}
+    \caption{Simulation vs.\ closed-form risk \eqref{eq:theory}.}
+    \label{fig:theory}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/fig2b_synthetic_signal_spread.pdf}
+    \caption{Decaying vs.\ flat coefficients.}
+    \label{fig:spread}
+  \end{subfigure}
+  \caption{Synthetic data, $n=100$, $\sigma=0.5$. (a) Points: empirical median and mean; dashed: theory (undefined for $99\le d\le101$). (b) Median test MSE for two shapes of $\beta^\star$; dotted: null model.}
+\end{figure}
+
+\subsection{When does over-parameterisation win?}\label{sec:spread}
+With flat coefficients (Figure~\ref{fig:spread}) the picture changes. Each feature explains only $1/500$ of the signal variance, so every under-parameterised model is no better than predicting zero: the classical optimum is the trivial model $d=1$ with MSE 1.257, against a null level of 1.25. The peak is even higher (median 499 at $d=n$), but the curve then descends all the way to $d=500$, and the \textbf{global minimum (1.108) lies in the over-parameterised regime}. This is the qualitative claim of the paper: the minimum-norm interpolant can generalise \emph{better} than any classical model. The two signal shapes show that this depends on the data. When the signal is concentrated in a few strong features, a small model captures it and over-parameterisation offers nothing. When it is spread thinly over many features, only a large model can collect it, and the implicit regularisation of the minimum norm keeps its variance under control. The gain is small here, however (about 12\% below the null model), because the problem is hard for every estimator.
+
+\subsection{Real data (a): raw features, $n=12$}
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/fig3_energy_raw_ls.pdf}
+    \caption{Least squares.}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/fig4_energy_raw_ridge.pdf}
+    \caption{Least squares vs ridge.}
+  \end{subfigure}
+  \caption{Energy data, first $d$ of 28 raw features in random order, $n=12$, medians over 300 trials. Threshold at $d=n-1=11$ because of centring.}
+  \label{fig:raw}
+\end{figure}
+
+Figure~\ref{fig:raw} shows that double descent also appears on real data with no feature engineering at all. The training error falls to $10^{-2}$ at $d=10$ and to numerical zero ($\sim10^{-29}$) at $d=11$, which confirms the threshold derived from the rank argument above. The test error peaks there at a median of \textbf{22.0} (mean $2.5\cdot10^4$), and the median norm at 6.3. It then falls monotonically to about 1.1 at $d=28$, with the norm decreasing to 0.72. Ridge with $\lambda=0.1$ removes the peak (maximum median 0.86).
+
+The negative side is clear, though. With 12 training points no linear model, regularised or not, beats the null model (0.345). The best least-squares model is $d=1$ (0.386), and even the right end of the second descent is three times worse than predicting the mean. The experiment shows the \emph{shape} of the curve, which depends only on the geometry of $X$, but it says nothing useful about predicting energy consumption. This motivated the second, more realistic setting.
+
+\subsection{Real data (b): random Fourier features, $n=500$}
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/fig5_energy_rff_ls.pdf}
+    \caption{Least squares, with reference levels.}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figures/fig6_energy_rff_ridge.pdf}
+    \caption{Least squares vs ridge.}
+  \end{subfigure}
+  \caption{Energy data, $N$ random Fourier features, $n=500$, medians over 20 trials (10 for CV).}
+  \label{fig:rff}
+\end{figure}
+
+Figure~\ref{fig:rff}(a) reproduces the RFF experiment of the paper. The training error reaches zero at $N=n=500$, and the test error has a sharp peak there (median $3.1\cdot10^4$, i.e.\ about $10^5$ times the null model). After the threshold it decreases monotonically, to 37.9 at $N=858$, 17.0 at $N=2\,072$ and 10.8 at $N=5\,000$, while $\norm{w}$ falls from $1.9\cdot10^4$ to 391. These are the paper's two mechanisms: the interpolating solution becomes smoother (smaller norm) as $N$ grows, and the test error follows it. As $N\to\infty$ the RFF predictor approaches the minimum-norm kernel interpolant, whose test MSE (5.97) is the asymptote of the second descent.
+
+Unlike in the paper, however, the second descent never becomes competitive. Even the kernel limit is 18 times worse than the null model (0.324) and than ordinary least squares on the 28 raw features (0.305). The classical optimum ($N=4$, 0.322) is essentially the null model. In contrast, \textbf{ridge on random features gives the best predictor of the whole project}: with $\lambda=10^{-2}$ the median test MSE is 0.277 at $N=858$ and stays between 0.277 and 0.283 for every $N\ge 61$. CV ridge stays between 0.293 and 0.311 and selects $\lambda\approx2\cdot10^{-3}$ once $N\ge400$. Both beat linear OLS, so the nonlinear features do carry signal. However, the improvement is modest ($R^2\approx 1-0.277/0.324\approx0.15$ relative to the null model). The target is mostly unpredictable from these inputs, and the chronological split adds a distribution shift on top.
+
+The likely reason is the noise level. The paper's datasets (MNIST, CIFAR-10, TIMIT, \dots) have labels that are an almost deterministic function of the input, so interpolating them costs little. Here most of the variance of $\log(\text{Appliances})$ is noise with respect to the inputs, and any interpolating predictor must fit that noise. A smaller norm limits the damage but cannot remove it. The noise experiment below shows the same effect under controlled conditions.
+
+%=====================================================================
+\section{Extensions}
+%=====================================================================
+\subsection{Gradient descent vs closed form}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.78\textwidth]{figures/fig7_gd_vs_closed_form.pdf}
+  \caption{Synthetic data ($n=100$, $\sigma=0.5$, 20 trials). Left: median test MSE of the closed form and of GD after $T$ iterations (from $w_0=0$), and of GD from a random $w_0$. Right: relative distance between GD from zero and $X^+y$.}
+  \label{fig:gd}
+\end{figure}
+
+Figure~\ref{fig:gd} compares GD with the closed form on the synthetic data. Away from the threshold, GD from $w_0=0$ with $T=10^4$ iterations coincides with $X^+y$ to machine precision (relative distance $\sim10^{-14}$), in both the under- and over-parameterised regimes. This is the implicit bias of \eqref{eq:gd} observed directly: nothing in the algorithm asks for the minimum norm, yet that is the interpolant it finds. Near $d=n$, however, convergence is very slow, because the smallest $s_i^2$ is tiny compared with $L$. At $d=100$ the distance after $10^4$ steps is still 0.89, and the GD test error (6.5) is far below the closed form (89). The slow convergence acts as a regulariser: with $T=100$ the peak disappears completely (test MSE $\approx1.04$ for all $d$ between 95 and 110), which is the early-stopping counterpart of ridge.
+
+GD from a random initialisation ($w_0\sim\mathcal N(0,I/d)$) gives identical results for $d<n$, where the solution is unique. For $d>n$ it still interpolates (training MSE 0), but it keeps the null-space component of $w_0$: at $d=500$ its norm is 1.03 (vs 0.51) and its test MSE 1.92 (vs 1.10), and the gap \emph{widens} with $d$ because the null space grows. Minimum-norm selection is therefore what makes the second descent possible. An arbitrary interpolant generalises much worse.
+
+\subsection{Effect of label noise}\label{sec:noise}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.78\textwidth]{figures/fig8_noise.pdf}
+  \caption{Synthetic data, $n=100$, decaying $\beta^\star$, $\sigma\in\{0,0.25,0.5,1\}$, 40 trials. Right: test MSE divided by $\operatorname{Var}(y)=1+\sigma^2$.}
+  \label{fig:noise}
+\end{figure}
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{lrrrrr}
+\toprule
+$\sigma$ & classical opt.\ ($d$, MSE) & at $d=n$ & best $d>n$ ($d$, MSE) & at $d=500$ & null \\
+\midrule
+0    & 47, 0.022 &   1.42 & 106, 0.125 & 0.79 & 1.00 \\
+0.25 & 20, 0.110 &  14.8  & 138, 0.506 & 0.88 & 1.06 \\
+0.5  & 13, 0.336 &  33.2  & 212, 1.006 & 1.11 & 1.25 \\
+1    &  7, 1.146 & 158.3  & 500, 2.044 & 2.04 & 2.00 \\
+\bottomrule
+\end{tabular}
+\caption{Effect of label noise (median test MSE).}
+\label{tab:noise}
+\end{table}
+
+Figure~\ref{fig:noise} and Table~\ref{tab:noise} show three systematic effects of increasing $\sigma$.
+\begin{enumerate}
+  \item \textbf{The peak grows} from 1.4 to 158. Its height is driven by $\sigma^2/s_{\min}^2$, as \eqref{eq:ls} predicts.
+  \item \textbf{The classical optimum moves left} ($d=47\to20\to13\to7$). With more noise, variance becomes expensive sooner, which is the classical bias--variance trade-off.
+  \item \textbf{The second descent becomes less useful.} At $\sigma=1$ the over-parameterised curve ends at the null level, so interpolating noisy labels is no better than predicting the mean.
+\end{enumerate}
+Even with $\sigma=0$ there is a peak, because the $500-d$ features the model cannot see act as noise. Its height is small (1.4) because that ``noise'' vanishes as $d$ approaches 500. The $\sigma=0.5$ row repeats the main experiment with different random draws: the peak median is 33 here against 95 in Figure~\ref{fig:synthetic}, while the minima agree to within 0.01. This is further evidence that the location of the threshold and the shape of the curve are reproducible but the height of the peak is not.
+
+%=====================================================================
+\section{Comparison across datasets}
+%=====================================================================
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.5\textwidth]{figures/fig9_comparison.pdf}
+  \caption{All three settings on a common scale: model size$/n$ (threshold at 1; the intercept is counted for raw features) and test MSE relative to the null model.}
+  \label{fig:comparison}
+\end{figure}
+
+\begin{table}[t]
+\centering\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{lrrrrrr}
+\toprule
+Dataset & $n$ & classical opt. & at threshold & largest model & null & best regularised \\
+\midrule
+Synthetic, decaying $\beta^\star$ & 100 & \textbf{0.335} ($d$=11) & 95.0 & 1.115 ($d$=500) & 1.25 & \textbf{0.335} (CV, $d$=13) \\
+Synthetic, flat $\beta^\star$     & 100 & 1.257 ($d$=1)  & 498.6 & \textbf{1.108} ($d$=500) & 1.25 & -- \\
+Energy, raw features              & 12  & 0.386 ($d$=1)  & 22.0 & 1.08 ($d$=28) & \textbf{0.345} & 0.382 ($\lambda$=0.1, $d$=1) \\
+Energy, RFF                       & 500 & 0.322 ($N$=4)  & 31\,170 & 10.85 ($N$=5000) & 0.324 & \textbf{0.277} ($\lambda$=0.01, $N$=858) \\
+\bottomrule
+\end{tabular}
+\caption{Summary of median test MSE. Bold: best value in each row (a tie in the first row).}
+\label{tab:summary}
+\end{table}
+
+Figure~\ref{fig:comparison} and Table~\ref{tab:summary} put the experiments side by side.
+
+\paragraph{What is common.} In every case the training error hits zero, and the test error peaks, at the predicted size: $d=n$ for synthetic data, $d=n-1$ for centred raw features, $N=n$ for random features. In every case the norm of the solution peaks at the same place and decreases afterwards, and ridge with a sensible $\lambda$ removes the peak. The threshold is a property of the \emph{design matrix}, not of the data distribution, and it can be located exactly from rank considerations before any training.
+
+\paragraph{What differs.}
+\begin{itemize}
+  \item \textbf{Peak height} ranges from 60 (raw energy) to $10^5$ (RFF) times the null error. The feature matrix near $N=n$ is much worse conditioned for random features than for Gaussian or raw features, most likely because cosine features with a common bandwidth are strongly correlated, and the larger $n$ (500) leaves more small singular values close to zero.
+  \item \textbf{Depth of the second descent.} On synthetic data it returns below the null level (ratio 0.8--0.9). On the energy data it never does (ratio $\approx3$ for raw features, $\approx33$ for RFF at $N=10n$).
+  \item \textbf{Whether over-parameterisation pays off} depends on two things that are visible in the experiments: how the signal is distributed (flat vs decaying $\beta^\star$) and how much of $y$ is noise ($\sigma$ sweep; energy data). Only the flat-$\beta^\star$ dataset has its global minimum in the interpolating regime.
+\end{itemize}
+
+%=====================================================================
+\section{Discussion}
+%=====================================================================
+\paragraph{Positive aspects.}
+\begin{itemize}
+  \item The double-descent curve and the interpolation threshold are reproduced on all required datasets, with the training error, test error and norm all behaving as the paper describes.
+  \item The simulation matches the closed-form risk \eqref{eq:theory} to within about 5\% everywhere outside the immediate neighbourhood of the threshold, and unit tests verify every solver against independent references. I am therefore confident that the curves reflect the phenomenon and not implementation artefacts.
+  \item Design choices that avoid misleading results: SVD-based solvers instead of the normal equations, medians with interquartile bands instead of means dominated by single trials, a leak-free chronological split with training-only standardisation, bandwidth and CV, and nested feature sets.
+  \item The extensions explain the \emph{mechanism}. GD shows that minimum norm is what an ordinary optimiser finds, and that an arbitrary interpolant does much worse. Early stopping and spectral truncation are shown to be regularisers equivalent to ridge.
+\end{itemize}
+
+\paragraph{Negative aspects and limitations.}
+\begin{itemize}
+  \item \textbf{The modern regime rarely wins here.} In three of four settings the best model is classical or regularised, and on real data the minimum-norm interpolant is always worse than predicting the mean. The experiments reproduce the \emph{shape} of double descent much more than the paper's practical message that ``bigger is better''. I consider this a valid result, not a failure of the reproduction, but it means the conclusions are about low-noise, many-weak-feature problems.
+  \item \textbf{Peak height is not robust.} It depends on the random draw (95 vs 33 for the same setting), on the singular-value cutoff (57.6 to 1.6), and for GD on the number of iterations. Only the location of the threshold should be read off the plots.
+  \item \textbf{Raw-feature experiment.} With 28 features, $n=12$ is needed to see both regimes, and at that sample size no model is useful. A dataset with hundreds of raw features would allow a more meaningful version.
+  \item \textbf{RFF choices not tuned.} The bandwidth follows the median heuristic and was not cross-validated, and $N$ stops at $10n$. A different bandwidth might lower the kernel limit. Cross-validated ridge was run on only 10 of the 20 trials, and its time-contiguous folds only approximate the chronological test split.
+  \item \textbf{Scope.} The paper also studies classification with zero--one loss, neural networks and random forests, and much larger $n$. This project covers only squared-loss regression with linear and random-feature models.
+\end{itemize}
+
+%=====================================================================
+\section{Conclusion}
+%=====================================================================
+In linear models, double descent follows directly from the minimum-norm least-squares solution. The test error explodes at the interpolation threshold because the smallest singular value of the design matrix goes to zero, and it falls again afterwards because adding parameters makes that singular value larger and the interpolant's norm smaller. The classical U-shaped curve is therefore an accurate description of the regime $d<n$ and an incomplete one overall. Whether the second descent is worth reaching depends on the problem: it helps when the signal is spread over many weak features and the labels are clean, and on noisy real data a properly regularised model is better. Explicit regularisation (ridge with a cross-validated penalty), implicit regularisation (early-stopped GD) and numerical regularisation (spectral truncation) all remove the peak. In practice, then, the interpolation threshold is a danger only for unregularised estimators.
+
+\paragraph{Repository.} \texttt{double\_descent.ipynb} (all code, about 8 minutes on a laptop), \texttt{figures/}, \texttt{results/} (CSV files with medians, quartiles and means for every experiment), \texttt{theory\_check.py} (Figure~\ref{fig:theory}), \texttt{report/} (this report: \LaTeX{} source and PDF). The data file \texttt{energydata\_complete.csv} is available from the UCI repository~\cite{candanedo2017}.
+
+\begin{thebibliography}{9}\small
+\bibitem{belkin2019} M.~Belkin, D.~Hsu, S.~Ma, S.~Mandal. Reconciling modern machine-learning practice and the classical bias--variance trade-off. \emph{PNAS}, 116(32):15849--15854, 2019.
+\bibitem{belkin2020} M.~Belkin, D.~Hsu, J.~Xu. Two models of double descent for weak features. \emph{SIAM Journal on Mathematics of Data Science}, 2(4):1167--1180, 2020.
+\bibitem{hastie2022} T.~Hastie, A.~Montanari, S.~Rosset, R.~J.~Tibshirani. Surprises in high-dimensional ridgeless least squares interpolation. \emph{Annals of Statistics}, 50(2):949--986, 2022.
+\bibitem{nakkiran2021} P.~Nakkiran, P.~Venkat, S.~Kakade, T.~Ma. Optimal regularization can mitigate double descent. \emph{ICLR}, 2021.
+\bibitem{rahimi2007} A.~Rahimi, B.~Recht. Random features for large-scale kernel machines. \emph{NeurIPS}, 2007.
+\bibitem{candanedo2017} L.~M.~Candanedo, V.~Feldheim, D.~Deramaix. Data driven prediction models of energy use of appliances in a low-energy house. \emph{Energy and Buildings}, 140:81--97, 2017. Data: \url{https://archive.ics.uci.edu/dataset/374/appliances+energy+prediction}.
+\end{thebibliography}
+
+\end{document}
